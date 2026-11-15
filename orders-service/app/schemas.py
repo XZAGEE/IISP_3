@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class OrderCreate(BaseModel):
@@ -111,4 +111,36 @@ class OrderRead(BaseModel):
     ms_zoning: str
 
     predicted_price: float | None
+    created_at: datetime
+    
+class UserCreate(BaseModel):
+    """Request schema for user registration."""
+
+    username: str = Field(
+        min_length=3,
+        max_length=64,
+        description="Unique username.",
+    )
+
+    password: str
+
+    @field_validator("password")
+    @classmethod
+    def validate_password(cls, value: str) -> str:
+        password_length = len(value.encode("utf-8"))
+
+        if password_length < 8 or password_length > 72:
+            raise ValueError("Password must contain between 8 and 72 bytes.")
+
+        return value
+
+
+class UserRead(BaseModel):
+    """Response schema representing a user."""
+
+    model_config = {"from_attributes": True}
+
+    id: int
+    username: str
+    is_active: bool
     created_at: datetime

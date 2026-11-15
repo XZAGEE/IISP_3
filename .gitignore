@@ -223,3 +223,7 @@ __marimo__/
 artifacts/
 *.csv
 !forecast-service/data/*.csv
+
+# Local secrets
+/secrets/*
+!/secrets/*.example
