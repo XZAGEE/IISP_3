@@ -4,4 +4,7 @@ __pycache__/
 artifacts/
 .venv/
 .pytest_cache/
+
+# Ignore CSV files except required datasets
 *.csv
+!forecast-service/data/*.csv

@@ -4,6 +4,7 @@ from pathlib import Path
 
 import joblib
 from sklearn.metrics import mean_absolute_error, r2_score
+from sklearn.model_selection import train_test_split
 
 from .model import (
     CAT,
@@ -25,25 +26,37 @@ def main() -> None:
 
     df = load_training_data()
 
-    model = train_model()
+    X = df[NUM + CAT]
+    y = df[TARGET]
 
-    predictions = model.predict(
-        df[NUM + CAT]
+    X_train, X_test, y_train, y_test = train_test_split(
+        X,
+        y,
+        test_size=0.2,
+        random_state=42,
     )
+    train_df = X_train.copy()
+    train_df[TARGET] = y_train
 
-    r2 = r2_score(
-        df[TARGET],
-        predictions,
-    )
+    model = train_model(train_df)
 
-    mae = mean_absolute_error(
-        df[TARGET],
-        predictions,
+    train_predictions = model.predict(X_train)
+    test_predictions = model.predict(X_test)
+
+    train_r2 = r2_score(y_train, train_predictions)
+    test_r2 = r2_score(y_test, test_predictions)
+
+    train_mae = mean_absolute_error(y_train, train_predictions)
+    test_mae = mean_absolute_error(y_test, test_predictions)
+
+    print(
+        f"[train] Train: R2={train_r2:.4f}, "
+        f"MAE={train_mae:.0f} USD"
     )
 
     print(
-        f"[train] Ames in-sample: "
-        f"R2={r2:.4f}, MAE={mae:.0f} USD"
+        f"[train] Test: R2={test_r2:.4f}, "
+        f"MAE={test_mae:.0f} USD"
     )
 
     ARTIFACTS.mkdir(
@@ -53,8 +66,10 @@ def main() -> None:
 
     artifact_path = ARTIFACTS / "model.pkl"
 
+    final_model = train_model(df)
+
     joblib.dump(
-        model,
+        final_model,
         artifact_path,
     )
 

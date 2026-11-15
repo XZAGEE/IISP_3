@@ -46,8 +46,6 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      forecast-api:
-        condition: service_healthy
 
 volumes:
   pgdata:

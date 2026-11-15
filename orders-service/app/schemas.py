@@ -59,6 +59,41 @@ class OrderUpdate(BaseModel):
         description="Updated client name.",
     )
 
+    gr_liv_area: float | None = Field(
+        default=None,
+        gt=0,
+        le=10_000,
+    )
+
+    total_bsmt_sf: float | None = Field(
+        default=None,
+        ge=0,
+        le=10_000,
+    )
+
+    garage_area: float | None = Field(
+        default=None,
+        ge=0,
+        le=2_000,
+    )
+    year_built: int | None = Field(
+            default=None,
+            ge=1872,
+            le=2010,
+    )
+
+    overall_qual: int | None = Field(
+        default=None,
+        ge=1,
+        le=10,
+    )
+
+    ms_zoning: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=10,
+    )
+
 
 class OrderRead(BaseModel):
     """Response schema representing an order."""

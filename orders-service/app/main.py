@@ -171,11 +171,49 @@ def update_order(
             detail="Order not found.",
         )
 
-    return crud.update_order(
-        db,
-        order,
-        data,
-    )
+    updated_fields = data.model_dump(exclude_unset=True)
+
+    feature_fields = {
+        "gr_liv_area",
+        "total_bsmt_sf",
+        "garage_area",
+        "year_built",
+        "overall_qual",
+        "ms_zoning",
+    }
+
+    if feature_fields.intersection(updated_fields):
+        payload = {
+            "gr_liv_area": updated_fields.get(
+                "gr_liv_area", order.gr_liv_area
+            ),
+            "total_bsmt_sf": updated_fields.get(
+                "total_bsmt_sf", order.total_bsmt_sf
+            ),
+            "garage_area": updated_fields.get(
+                "garage_area", order.garage_area
+            ),
+            "year_built": updated_fields.get(
+                "year_built", order.year_built
+            ),
+            "overall_qual": updated_fields.get(
+                "overall_qual", order.overall_qual
+            ),
+            "ms_zoning": updated_fields.get(
+                "ms_zoning", order.ms_zoning
+            ),
+        }
+
+        try:
+            order.predicted_price = _request_prediction(payload)
+        except Exception as exc:
+            logger.error(
+                "Forecast service is unavailable during order update: %s",
+                exc,
+            )
+            order.predicted_price = None
+
+    return crud.update_order(db, order, data)
 
 
 @app.delete(

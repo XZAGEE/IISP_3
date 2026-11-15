@@ -31,12 +31,12 @@ TARGET = "SalePrice"
 
 # Column names used by the Ames Housing CSV.
 CSV_COLUMNS = {
-    "Gr Liv Area": "GrLivArea",
-    "Total Bsmt SF": "TotalBsmtSF",
-    "Garage Area": "GarageArea",
-    "Year Built": "YearBuilt",
-    "Overall Qual": "OverallQual",
-    "MS Zoning": "MSZoning",
+    "GrLivArea": "GrLivArea",
+    "TotalBsmtSF": "TotalBsmtSF",
+    "GarageArea": "GarageArea",
+    "YearBuilt": "YearBuilt",
+    "OverallQual": "OverallQual",
+    "MSZoning": "MSZoning",
     "SalePrice": "SalePrice",
 }
 
@@ -67,7 +67,7 @@ def load_training_data() -> pd.DataFrame:
     return df[columns].dropna(subset=[TARGET])
 
 
-def train_model() -> Pipeline:
+def train_model(df: pd.DataFrame | None = None) -> Pipeline:
     """Build and train the Ridge regression pipeline.
 
     Numerical features are imputed using the median and standardized.
@@ -122,7 +122,8 @@ def train_model() -> Pipeline:
         ]
     )
 
-    df = load_training_data()
+    if df is None:
+        df = load_training_data()
 
     pipe.fit(
         df[NUM + CAT],
