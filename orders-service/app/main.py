@@ -1,9 +1,15 @@
 import logging
 import os
-
 import httpx
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import (
+    BackgroundTasks,
+    Depends,
+    FastAPI,
+    HTTPException,
+    Response,
+    status,
+)
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -13,7 +19,6 @@ from tenacity import (
     stop_after_attempt,
     wait_exponential,
 )
-
 from . import crud, schemas
 from .auth import (
     create_access_token,
@@ -21,11 +26,11 @@ from .auth import (
     get_password_hash,
     verify_password,
 )
-from .database import Base, engine, get_db
+from .database import Base, engine, get_db, SessionLocal
 from .models import User
+import asyncio
 
 load_dotenv()
-
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -41,6 +46,9 @@ FORECAST_URL = os.getenv(
 FORECAST_TIMEOUT = float(
     os.getenv("FORECAST_TIMEOUT", "3.0")
 )
+BATCH_MAX_ITEMS = int(
+    os.getenv("BATCH_MAX_ITEMS", "50")
+)
 
 # Tables are created automatically for the initial version.
 # In production, replace this with Alembic migrations.
@@ -51,6 +59,18 @@ app = FastAPI(
     version="0.1.0",
 )
 
+@app.on_event("startup")
+async def startup_event():
+    """Create a shared HTTP client on application startup."""
+    app.state.http_client = httpx.AsyncClient(
+        timeout=FORECAST_TIMEOUT
+    )
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Close the shared HTTP client on application shutdown."""
+    await app.state.http_client.aclose()
 
 # -------------------------
 # Authentication endpoints
@@ -169,7 +189,18 @@ def _request_prediction(payload: dict) -> float:
 
     return float(response.json()["predicted_price"])
 
+async def _request_batch_prediction(
+    client: httpx.AsyncClient,
+    payload: dict,
+) -> float:
+    """Request a price prediction asynchronously."""
+    response = await client.post(
+        f"{FORECAST_URL}/predict",
+        json=payload,
+    )
+    response.raise_for_status()
 
+    return float(response.json()["predicted_price"])
 # -------------------------
 # Public health endpoint
 # -------------------------
@@ -179,6 +210,156 @@ def health() -> dict[str, str]:
     """Return the health status of the Orders API."""
     return {"status": "ok"}
 
+# -------------------------
+# Background prediction
+# -------------------------
+
+def predict_order_in_background(
+    order_id: int,
+    payload: dict,
+) -> None:
+    """Calculate and save an order prediction in the background."""
+    from datetime import datetime, timezone
+
+    db = SessionLocal()
+
+    try:
+        price = _request_prediction(payload)
+
+        updated_order = crud.update_order_prediction(
+            db,
+            order_id,
+            price,
+        )
+
+        if updated_order is not None:
+            logger.info(
+                "Background prediction completed: order_id=%s, "
+                "price=%.2f, timestamp=%s",
+                order_id,
+                price,
+                datetime.now(timezone.utc).isoformat(),
+            )
+
+    except Exception:
+        logger.exception(
+            "Background prediction failed: order_id=%s",
+            order_id,
+        )
+
+        crud.update_order_prediction(
+            db,
+            order_id,
+            None,
+        )
+
+    finally:
+        db.close()
+
+# -------------------------
+# Batch order endpoint
+# -------------------------
+
+@app.post("/orders/batch")
+async def create_orders_batch(
+    data: list[schemas.OrderCreate],
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Create multiple orders and request predictions concurrently."""
+
+    if len(data) == 0 or len(data) > BATCH_MAX_ITEMS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Batch must contain between 1 and {BATCH_MAX_ITEMS} orders.",
+        )
+
+    client = app.state.http_client
+
+    async def get_prediction(index: int, order_data: schemas.OrderCreate):
+        try:
+            price = await _request_batch_prediction(
+                client,
+                order_data.model_dump(),
+            )
+            return {
+                "index": index,
+                "price": price,
+                "error": None,
+            }
+
+        except Exception as exc:
+            logger.exception(
+                "Batch prediction failed for item %s",
+                index,
+            )
+            return {
+                "index": index,
+                "price": None,
+                "error": str(exc),
+            }
+
+    # Request all predictions concurrently.
+    predictions = await asyncio.gather(
+        *[
+            get_prediction(index, order_data)
+            for index, order_data in enumerate(data)
+        ]
+    )
+
+    results = []
+
+    # Save orders independently using the database session.
+    for prediction, order_data in zip(predictions, data):
+        try:
+            order = crud.create_order(
+                db,
+                order_data,
+                prediction["price"],
+            )
+
+            if prediction["error"] is not None:
+                crud.update_order_prediction(
+                    db,
+                    order.id,
+                    None,
+                )
+
+            result = {
+                "index": prediction["index"],
+                "order_id": order.id,
+                "status": (
+                    "failed"
+                    if prediction["error"] is not None
+                    else "priced"
+                ),
+            }
+
+            if prediction["error"] is not None:
+                result["error"] = prediction["error"]
+            else:
+                result["predicted_price"] = prediction["price"]
+
+            results.append(result)
+
+        except Exception:
+            db.rollback()
+            logger.exception(
+                "Could not save batch item %s",
+                prediction["index"],
+            )
+
+            results.append({
+                "index": prediction["index"],
+                "order_id": None,
+                "status": "error",
+                "error": "Could not save order.",
+            })
+
+    return {
+        "total": len(results),
+        "results": results,
+    }
 
 # -------------------------
 # Protected order endpoints
@@ -187,28 +368,36 @@ def health() -> dict[str, str]:
 @app.post(
     "/orders",
     response_model=schemas.OrderRead,
-    status_code=201,
+    status_code=status.HTTP_202_ACCEPTED,
 )
 def create_order(
     data: schemas.OrderCreate,
+    background_tasks: BackgroundTasks,
+    response: Response,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Create an order and attempt to obtain a price prediction."""
-    try:
-        price = _request_prediction(data.model_dump())
-    except Exception as exc:
-        logger.error(
-            "Forecast service is unavailable: %s",
-            exc,
-        )
-        price = None
-
-    return crud.create_order(
+    """Create an order and schedule background price prediction."""
+    order = crud.create_order(
         db,
         data,
-        price,
+        None,
     )
+
+    background_tasks.add_task(
+        predict_order_in_background,
+        order.id,
+        data.model_dump(),
+    )
+
+    response.headers["Location"] = f"/orders/{order.id}"
+
+    logger.info(
+        "Order created: order_id=%s, status=pending",
+        order.id,
+    )
+
+    return order
 
 
 @app.get(
@@ -262,6 +451,7 @@ def get_order(
     return order
 
 
+
 @app.patch(
     "/orders/{oid}",
     response_model=schemas.OrderRead,
@@ -269,10 +459,11 @@ def get_order(
 def update_order(
     oid: int,
     data: schemas.OrderUpdate,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Update an existing order."""
+    """Update an order and schedule a new prediction if needed."""
     order = crud.get_order(db, oid)
 
     if order is None:
@@ -292,38 +483,42 @@ def update_order(
         "ms_zoning",
     }
 
-    if feature_fields.intersection(updated_fields):
+    property_changed = bool(
+        feature_fields.intersection(updated_fields)
+    )
+
+    # Update the provided order fields.
+    order = crud.update_order(db, order, data)
+
+    if property_changed:
+        # Clear the old prediction and mark the order as pending.
+        order.predicted_price = None
+        order.status = "pending"
+        db.commit()
+        db.refresh(order)
+
+        # Build the payload using the updated property features.
         payload = {
-            "gr_liv_area": updated_fields.get(
-                "gr_liv_area", order.gr_liv_area
-            ),
-            "total_bsmt_sf": updated_fields.get(
-                "total_bsmt_sf", order.total_bsmt_sf
-            ),
-            "garage_area": updated_fields.get(
-                "garage_area", order.garage_area
-            ),
-            "year_built": updated_fields.get(
-                "year_built", order.year_built
-            ),
-            "overall_qual": updated_fields.get(
-                "overall_qual", order.overall_qual
-            ),
-            "ms_zoning": updated_fields.get(
-                "ms_zoning", order.ms_zoning
-            ),
+            "gr_liv_area": order.gr_liv_area,
+            "total_bsmt_sf": order.total_bsmt_sf,
+            "garage_area": order.garage_area,
+            "year_built": order.year_built,
+            "overall_qual": order.overall_qual,
+            "ms_zoning": order.ms_zoning,
         }
 
-        try:
-            order.predicted_price = _request_prediction(payload)
-        except Exception as exc:
-            logger.error(
-                "Forecast service is unavailable during order update: %s",
-                exc,
-            )
-            order.predicted_price = None
+        background_tasks.add_task(
+            predict_order_in_background,
+            order.id,
+            payload,
+        )
 
-    return crud.update_order(db, order, data)
+        logger.info(
+            "Order updated: order_id=%s, status=pending",
+            order.id,
+        )
+
+    return order
 
 
 @app.delete(

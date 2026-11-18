@@ -1,7 +1,5 @@
 from datetime import datetime
-
 from pydantic import BaseModel, Field, field_validator
-
 
 class OrderCreate(BaseModel):
     """Request schema for creating a new order."""
@@ -97,20 +95,17 @@ class OrderUpdate(BaseModel):
 
 class OrderRead(BaseModel):
     """Response schema representing an order."""
-
     model_config = {"from_attributes": True}
-
     id: int
     client_name: str
-
     gr_liv_area: float
     total_bsmt_sf: float
     garage_area: float
     year_built: int
     overall_qual: int
     ms_zoning: str
-
     predicted_price: float | None
+    status: str
     created_at: datetime
     
 class UserCreate(BaseModel):

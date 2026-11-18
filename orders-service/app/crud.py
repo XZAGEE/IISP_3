@@ -1,8 +1,6 @@
 from sqlalchemy import select
 from sqlalchemy.orm import Session
-
 from . import models, schemas
-
 
 def create_order(
     db: Session,
@@ -13,19 +11,16 @@ def create_order(
     order = models.Order(
         **data.model_dump(),
         predicted_price=price,
+        status="priced" if price is not None else "pending",
     )
-
     db.add(order)
     db.commit()
     db.refresh(order)
-
     return order
-
 
 def get_order(db: Session, oid: int) -> models.Order | None:
     """Retrieve an order by its ID."""
     return db.get(models.Order, oid)
-
 
 def list_orders(
     db: Session,
@@ -42,7 +37,6 @@ def list_orders(
         )
     )
 
-
 def update_order(
     db: Session,
     order: models.Order,
@@ -51,14 +45,35 @@ def update_order(
     """Update the provided fields of an existing order."""
     for key, value in data.model_dump(exclude_unset=True).items():
         setattr(order, key, value)
-
     db.commit()
     db.refresh(order)
-
     return order
-
 
 def delete_order(db: Session, order: models.Order) -> None:
     """Delete an existing order from the database."""
     db.delete(order)
     db.commit()
+
+def update_order_prediction(
+    db: Session,
+    oid: int,
+    price: float | None,
+) -> models.Order | None:
+    """Update prediction result and order status."""
+    order = db.get(models.Order, oid)
+
+    # The order may have been deleted while the task was running.
+    if order is None:
+        return None
+
+    if price is not None:
+        order.predicted_price = price
+        order.status = "priced"
+    else:
+        order.predicted_price = None
+        order.status = "failed"
+
+    db.commit()
+    db.refresh(order)
+
+    return order
